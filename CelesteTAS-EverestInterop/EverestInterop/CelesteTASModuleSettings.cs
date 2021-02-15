@@ -133,5 +133,7 @@ public class CelesteTASModuleSettings : EverestModuleSettings {
     #endregion
 
     [SettingIgnore] public bool FirstLaunch { get; set; } = true;
+
+    public bool NewAnalogMode { get; set; } = true;
 }
 }

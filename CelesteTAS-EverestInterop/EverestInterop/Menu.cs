@@ -50,6 +50,8 @@ internal static class Menu {
             }),
 
             new TextMenuExt.SubMenu("More Options".ToDialogText(), false).Apply(subMenu => {
+                subMenu.Add(new TextMenu.OnOff("New Analog Mode", Settings.NewAnalogMode).Change(value =>
+                    Settings.NewAnalogMode = value));
                 subMenu.Add(new TextMenu.OnOff("Center Camera".ToDialogText(), Settings.CenterCamera).Change(value =>
                     Settings.CenterCamera = value));
                 subMenu.Add(new TextMenu.OnOff("Round Position".ToDialogText(), Settings.RoundPosition).Change(value =>

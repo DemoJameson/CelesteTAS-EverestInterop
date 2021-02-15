@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Reflection;
 using Celeste;
 using GameInput = Celeste.Input;
@@ -11,6 +12,8 @@ using TAS.StudioCommunication;
 using TAS.Input;
 using FMOD;
 using System.Net.NetworkInformation;
+using Command = Monocle.Command;
+using Commands = Monocle.Commands;
 
 namespace TAS {
     [Flags]
@@ -261,10 +264,8 @@ namespace TAS {
             RestorePlayerBindings();
             Celeste.Mod.Core.CoreModule.Settings.UseKeyboardForTextInput = kbTextInput;
             controller.resetSpawn = null;
-            if (ExportSyncData) {
-                EndExport();
-                ExportSyncData = false;
-            }
+            EndExport();
+            ExportSyncData = false;
 
             enforceLegal = false;
             allowUnsafeInput = false;
@@ -433,7 +434,181 @@ namespace TAS {
             return new Vector2((float)X/validArea,(float)Y/validArea);
         }
         private static Vector2 ValidateFeatherInput(InputFrame input) {
-            return ComputeFeather(input.GetX(),input.GetY());
+            ComputeNewAngle(input, OldValidateFeatherInput(input));
+            if (settings.NewAnalogMode) {
+                return ComputeFeather(input.GetX(),input.GetY());
+            } else {
+                return OldValidateFeatherInput(input);
+            }
+        }
+
+        private static readonly Dictionary<float, Vector2> newAngleToAimValues = new Dictionary<float, Vector2>();
+
+        private static void ComputeNewAngle(InputFrame input, Vector2 oldAimValue) {
+            if (controller.CurrentFrame > 0 && controller.Previous == controller.Current) {
+                return;
+            }
+            const short deadzone = 7849;
+            const short validArea = 32767 - deadzone;
+
+            float newAngle = input.Angle;
+            InputFrame newInput = input.Clone();
+            if (analogueMode == AnalogueMode.Square || analogueMode == AnalogueMode.Circle) {
+                Vector2 newAimValue = oldAimValue * validArea;
+                newAimValue = newAimValue - Vector2.One * 0.5f;
+                newAimValue = newAimValue / validArea;
+                if (analogueMode == AnalogueMode.Square) {
+                    newAimValue = newAimValue / newAimValue.Length();
+                }
+
+                newAimValue = new Vector2(Math.Abs(newAimValue.X) * Math.Sign(oldAimValue.X), Math.Abs(newAimValue.Y) * Math.Sign(oldAimValue.Y));
+
+                newAngle = (float) (Math.Acos(newAimValue.Y) * 180f / Math.PI);
+            } else if (analogueMode == AnalogueMode.Precise) {
+                if (newAngleToAimValues.Count == 0) {
+                    for (float angle = 0f; angle <= 360f; angle += 0.001f) {
+                        newInput.Angle = angle;
+                        newAngleToAimValues[angle] = ComputeFeather(newInput.GetX(),newInput.GetY());
+                    }
+                }
+
+                float closestLength = 10f;
+                foreach (KeyValuePair<float,Vector2> pair in newAngleToAimValues) {
+                    if (Vector2.Distance(pair.Value, oldAimValue) < closestLength) {
+                        closestLength = Vector2.Distance(pair.Value, oldAimValue);
+                        newAngle = pair.Key;
+                    }
+                }
+            }
+
+            if (Math.Abs(input.Angle - newAngle) > 0.00000001f) {
+                string text = analogueMode == AnalogueMode.Precise ? "Maybe need to" : "Must be";
+                string log = $"{controller.Current.Line.ToString().PadLeft(4)} {controller.Current} {analogueMode} {text} change angle to {newAngle}\n\n";
+                log .Log();
+                Engine.Commands?.Log(log);
+            }
+        }
+
+
+        private static Vector2 OldValidateFeatherInput(InputFrame input) {
+            const float maxShort = short.MaxValue;
+            short X;
+            short Y;
+            switch (analogueMode) {
+                case AnalogueMode.Ignore:
+                    return new Vector2(input.GetX(), input.GetY());
+                case AnalogueMode.Circle:
+                    X = (short)(input.GetX() * maxShort);
+                    Y = (short)(input.GetY() * maxShort);
+                    break;
+                case AnalogueMode.Square:
+                    float x = input.GetX();
+                    float y = input.GetY();
+                    float mult = 1 / Math.Max(Math.Abs(x), Math.Abs(y));
+                    x *= mult;
+                    y *= mult;
+                    X = (short)(x * maxShort);
+                    Y = (short)(y * maxShort);
+                    break;
+                case AnalogueMode.Precise:
+                    if (input.Angle == 0) {
+                        X = 0;
+                        Y = short.MaxValue;
+                        break;
+                    }
+
+                    OldGetPreciseFeatherPos(input.GetX(), input.GetY(), out X, out Y);
+                    break;
+                default:
+                    throw new Exception("what the fuck");
+            }
+            // SDL2_FNAPlatform.GetGamePadState()
+            // (float)SDL.SDL_GameControllerGetAxis(intPtr, SDL.SDL_GameControllerAxis.SDL_CONTROLLER_AXIS_LEFTX) / 32767f
+
+            return new Vector2((float)X / maxShort, (float)Y / maxShort);
+        }
+
+        //https://www.ics.uci.edu/~eppstein/numth/frap.c
+        private static void OldGetPreciseFeatherPos(float xPos, float yPos, out short outX, out short outY) {
+            //special cases where this is imprecise
+            if (Math.Abs(xPos) == Math.Abs(yPos) || Math.Abs(xPos) < 1E-10 || Math.Abs(yPos) < 1E-10) {
+                if (Math.Abs(xPos) < 1E-10)
+                    xPos = 0;
+                if (Math.Abs(yPos) < 1E-10)
+                    yPos = 0;
+                outX = (short)(short.MaxValue * (short)Math.Sign(xPos));
+                outY = (short)(short.MaxValue * (short)Math.Sign(yPos));
+                return;
+            }
+
+            if (Math.Abs(xPos) > Math.Abs(yPos)) {
+                OldGetPreciseFeatherPos(yPos, xPos, out outY, out outX);
+                return;
+            }
+
+
+            long[][] m = new long[2][];
+            m[0] = new long[2];
+            m[1] = new long[2];
+            double x = xPos / yPos;
+            double startx = x;
+            short maxden = short.MaxValue;
+            long ai;
+
+            /* initialize matrix */
+            m[0][0] = m[1][1] = 1;
+            m[0][1] = m[1][0] = 0;
+
+            /* loop finding terms until denom gets too big */
+            while (m[1][0] * (ai = (long)x) + m[1][1] <= maxden) {
+                long t;
+                t = m[0][0] * ai + m[0][1];
+                m[0][1] = m[0][0];
+                m[0][0] = t;
+                t = m[1][0] * ai + m[1][1];
+                m[1][1] = m[1][0];
+                m[1][0] = t;
+                if (x == (double)ai)
+                    break; // AF: division by zero
+                x = 1 / (x - (double)ai);
+                if (x > (double)0x7FFFFFFF)
+                    break; // AF: representation failure
+            }
+
+            /* now remaining x is between 0 and 1/ai */
+            /* approx as either 0 or 1/m where m is max that will fit in maxden */
+            /* first try zero */
+            outX = (short)m[0][0];
+            outY = (short)m[1][0];
+
+            double err1 = startx - ((double)m[0][0] / (double)m[1][0]);
+
+            /* now try other possibility */
+            ai = (maxden - m[1][1]) / m[1][0];
+            m[0][0] = m[0][0] * ai + m[0][1];
+            m[1][0] = m[1][0] * ai + m[1][1];
+
+            double err2 = startx - ((double)m[0][0] / (double)m[1][0]);
+
+
+            //magic
+            if (err1 > err2) {
+                outX = (short)m[0][0];
+                outY = (short)m[1][0];
+            }
+
+            //why is there no short negation operator lmfao
+            if (yPos < 0) {
+                outX = (short)-outX;
+                outY = (short)-outY;
+            }
+
+            //make sure it doesn't end up in the deadzone
+            short mult = (short)Math.Floor(short.MaxValue / (float)Math.Max(Math.Abs(outX), Math.Abs(outY)));
+            outX *= mult;
+            outY *= mult;
+
+            return;
         }
 
         //https://www.ics.uci.edu/~eppstein/numth/frap.c
