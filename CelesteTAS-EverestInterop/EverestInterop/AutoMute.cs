@@ -1,104 +1,149 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using Celeste;
-using Celeste.Mod;
+using FMOD;
 using FMOD.Studio;
-using Microsoft.Xna.Framework;
 
 namespace TAS.EverestInterop {
-    public class AutoMute {
-        public static AutoMute instance;
-        private static bool shouldBeMute => Manager.FrameLoops >= 2 && CelesteTASModule.Settings.AutoMute;
+public static class AutoMute {
+    private static readonly HashSet<string> LoopAudioPaths = new HashSet<string> {
+        "event:/char/madeline/wallslide",
+        "event:/char/madeline/dreamblock_travel",
+        "event:/char/madeline/water_move_shallow",
+        "event:/char/badeline/boss_bullet",
+        "event:/ui/game/memorial_dream_loop",
+        "event:/ui/game/memorial_dream_text_loop",
+        "event:/ui/game/memorial_text_loop",
+        "event:/game/general/birdbaby_tweet_loop",
+        "event:/game/general/crystalheart_blue_get",
+        "event:/game/general/crystalheart_red_get",
+        "event:/game/general/crystalheart_gold_get",
+        "event:/game/00_prologue/bridge_rumble_loop",
+        "event:/game/01_forsaken_city/birdbros_fly_loop",
+        "event:/game/01_forsaken_city/console_static_loop",
+        "event:/game/02_old_site/sequence_phone_ring_loop",
+        "event:/game/02_old_site/sequence_phone_ringtone_loop",
+        "event:/game/03_resort/platform_vert_down_loop",
+        "event:/game/03_resort/platform_vert_up_loop",
+        "event:/game/04_cliffside/arrowblock_move",
+        "event:/game/04_cliffside/gondola_movement_loop",
+        "event:/game/04_cliffside/gondola_halted_loop",
+        "event:/game/04_cliffside/gondola_movement_loop",
+        "event:/game/05_mirror_temple/mainmirror_torch_loop",
+        "event:/game/05_mirror_temple/redbooster_move",
+        "event:/game/05_mirror_temple/swapblock_return",
+        "event:/game/06_reflection/badeline_pull_rumble_loop",
+        "event:/game/06_reflection/crushblock_move_loop",
+        "event:/game/06_reflection/crushblock_move_loop_covert",
+        "event:/game/06_reflection/crushblock_return_loop",
+        "event:/game/06_reflection/feather_state_loop",
+        "event:/game/06_reflection/badeline_pull_rumble_loop",
+        "event:/game/09_core/conveyor_activate",
+        "event:/game/09_core/rising_threat",
+        "event:/new_content/game/10_farewell/glider_movement",
+        "event:/new_content/game/10_farewell/fakeheart_get",
+    };
 
-        private int? lastSFXVolume;
-        private EventInstance dummy;
+    private static readonly Dictionary<WeakReference<EventInstance>, int> LoopAudioInstances = new Dictionary<WeakReference<EventInstance>, int>();
+    private static bool settingMusic;
+    private static CelesteTASModuleSettings tasSettings => CelesteTASModule.Settings;
+    private static bool shouldBeMute => Manager.FrameLoops >= 2 && CelesteTASModule.Settings.AutoMute && !settingMusic;
+    private static bool frameStep => Manager.Running && (Manager.state & State.FrameStep) != 0;
 
-        public void Load() {
-            On.Monocle.Scene.Update += SceneOnUpdate;
-            On.Celeste.SoundSource.Play += SoundSourceOnPlay;
-            On.Celeste.Audio.Play_string += AudioOnPlay_string;
-            On.Celeste.Audio.Play_string_Vector2 += AudioOnPlay_string_Vector2;
-            On.Celeste.Audio.Play_string_string_float += AudioOnPlay_string_string_float;
-            On.Celeste.Audio.Play_string_Vector2_string_float_string_float +=
-                AudioOnPlay_string_Vector2_string_float_string_float;
-        }
+    public static void Load() {
+        On.Celeste.Audio.SetMusic += AudioOnSetMusic;
+        On.Celeste.Audio.SetAltMusic += AudioOnSetAltMusic;
+        On.FMOD.Studio.EventDescription.createInstance += EventDescriptionOnCreateInstance;
+        On.Monocle.Scene.Update += SceneOnUpdate;
+        On.Celeste.Level.Render += LevelOnRender;
+    }
 
-        public void Unload() {
-            On.Monocle.Scene.Update -= SceneOnUpdate;
-            On.Celeste.SoundSource.Play -= SoundSourceOnPlay;
-            On.Celeste.Audio.Play_string -= AudioOnPlay_string;
-            On.Celeste.Audio.Play_string_Vector2 -= AudioOnPlay_string_Vector2;
-            On.Celeste.Audio.Play_string_string_float -= AudioOnPlay_string_string_float;
-            On.Celeste.Audio.Play_string_Vector2_string_float_string_float -=
-                AudioOnPlay_string_Vector2_string_float_string_float;
-        }
+    public static void Unload() {
+        On.Celeste.Audio.SetMusic -= AudioOnSetMusic;
+        On.Celeste.Audio.SetAltMusic -= AudioOnSetAltMusic;
+        On.FMOD.Studio.EventDescription.createInstance -= EventDescriptionOnCreateInstance;
+        On.Monocle.Scene.Update -= SceneOnUpdate;
+        On.Celeste.Level.Render -= LevelOnRender;
+    }
 
-        private EventInstance getDummyEventInstance() {
-            if (dummy == null) {
-                // this sound does exist, but is silent if we don't set any audio param to it.
-                dummy = Audio.CreateInstance("event:/char/madeline/footstep");
-                dummy.setVolume(0);
-            }
-            return dummy;
-        }
+    private static void AudioOnSetAltMusic(On.Celeste.Audio.orig_SetAltMusic orig, string path) {
+        settingMusic = true;
+        orig(path);
+        settingMusic = false;
+    }
 
-        private EventInstance AudioOnPlay_string_string_float(On.Celeste.Audio.orig_Play_string_string_float orig,
-            string path, string param, float value) {
+    private static bool AudioOnSetMusic(On.Celeste.Audio.orig_SetMusic orig, string path, bool startPlaying, bool allowFadeOut) {
+        settingMusic = true;
+        bool result = orig(path, startPlaying, allowFadeOut);
+        settingMusic = false;
+        return result;
+    }
+
+    private static RESULT EventDescriptionOnCreateInstance(On.FMOD.Studio.EventDescription.orig_createInstance orig, EventDescription self,
+        out EventInstance instance) {
+        RESULT result = orig(self, out instance);
+
+        if (instance != null && self.getPath(out string path) == RESULT.OK && path != null) {
             if (shouldBeMute) {
-                return getDummyEventInstance();
+                instance.setVolume(0);
             }
 
-            return orig(path, param, value);
+            int delayFrames = -1;
+            if (LoopAudioPaths.Contains(path)) {
+                delayFrames = 10;
+            } else if (path.StartsWith("event:/env/local/") || path.StartsWith("event:/new_content/env/")) {
+                delayFrames = 0;
+            }
+
+            if (delayFrames >= 0) {
+                LoopAudioInstances.Add(new WeakReference<EventInstance>(instance), delayFrames);
+            }
         }
 
-        private EventInstance AudioOnPlay_string_Vector2_string_float_string_float(
-            On.Celeste.Audio.orig_Play_string_Vector2_string_float_string_float orig, string path, Vector2 position,
-            string param, float value, string param2, float value2) {
-            if (shouldBeMute) {
-                return getDummyEventInstance();
-            }
+        return result;
+    }
 
-            return orig(path, position, param, value, param2, value2);
+    private static void SceneOnUpdate(On.Monocle.Scene.orig_Update orig, Monocle.Scene self) {
+        orig(self);
+
+        if (shouldBeMute && tasSettings.LastSFXVolume < 0) {
+            tasSettings.LastSFXVolume = Settings.Instance.SFXVolume;
+            CelesteTASModule.Instance.SaveSettings();
+            Settings.Instance.SFXVolume = 0;
+            Settings.Instance.ApplyVolumes();
         }
 
-        private EventInstance AudioOnPlay_string_Vector2(On.Celeste.Audio.orig_Play_string_Vector2 orig, string path,
-            Vector2 position) {
-            if (shouldBeMute) {
-                return getDummyEventInstance();
-            }
-
-            return orig(path, position);
+        if (!shouldBeMute && tasSettings.LastSFXVolume >= 0) {
+            Settings.Instance.SFXVolume = tasSettings.LastSFXVolume;
+            Settings.Instance.ApplyVolumes();
+            tasSettings.LastSFXVolume = -1;
+            CelesteTASModule.Instance.SaveSettings();
         }
+    }
 
-        private EventInstance AudioOnPlay_string(On.Celeste.Audio.orig_Play_string orig, string path) {
-            if (shouldBeMute) {
-                return getDummyEventInstance();
-            }
+    private static void LevelOnRender(On.Celeste.Level.orig_Render orig, Level self) {
+        orig(self);
 
-            return orig(path);
-        }
+        if (frameStep) {
+            Audio.CurrentAmbienceEventInstance?.setVolume(0);
 
-        private SoundSource SoundSourceOnPlay(On.Celeste.SoundSource.orig_Play orig, SoundSource self, string path,
-            string param, float value) {
-            if (shouldBeMute) {
-                return self;
-            }
-
-            return orig(self, path, param, value);
-        }
-
-        private void SceneOnUpdate(On.Monocle.Scene.orig_Update orig, Monocle.Scene self) {
-            orig(self);
-
-            if (shouldBeMute && lastSFXVolume == null) {
-                lastSFXVolume = Settings.Instance.SFXVolume;
-                Settings.Instance.SFXVolume = 0;
-                Settings.Instance.ApplyVolumes();
-            }
-
-            if (!shouldBeMute && lastSFXVolume != null) {
-                Settings.Instance.SFXVolume = (int) lastSFXVolume;
-                Settings.Instance.ApplyVolumes();
-                lastSFXVolume = null;
+            if (LoopAudioInstances.Count > 0) {
+                WeakReference<EventInstance>[] copy = LoopAudioInstances.Keys.ToArray();
+                foreach (WeakReference<EventInstance> loopAudioInstance in copy) {
+                    if (loopAudioInstance.TryGetTarget(out EventInstance eventInstance)) {
+                        if (LoopAudioInstances[loopAudioInstance] <= 0) {
+                            eventInstance.setVolume(0);
+                            LoopAudioInstances.Remove(loopAudioInstance);
+                        } else {
+                            LoopAudioInstances[loopAudioInstance]--;
+                        }
+                    } else {
+                        LoopAudioInstances.Remove(loopAudioInstance);
+                    }
+                }
             }
         }
     }
+}
 }
